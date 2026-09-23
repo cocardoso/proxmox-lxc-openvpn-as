@@ -49,6 +49,11 @@ Antes de criar, uma tela de resumo pede confirmação.
   com a chave em `/etc/apt/keyrings/as-repository.asc`, e o pacote `openvpn-as`.
 - Configuração via `sacli`: `host.name`, `vpn.server.daemon.tcp.port`,
   `vpn.server.daemon.udp.port` e a senha local do usuário `openvpn`.
+- **DCO desligado** (`vpn.server.daemon.ovpndco=false`). O Data Channel Offload
+  (módulo `ovpn` do kernel), padrão no AS 3.x, precisa de `CAP_NET_ADMIN` no
+  namespace do host. Num LXC não privilegiado as chamadas netlink falham
+  (`dco_get_peer: Operation not permitted`) e os daemons caem. Sem DCO eles
+  usam `/dev/net/tun`.
 
 Ao final aparecem as URLs:
 
@@ -86,6 +91,7 @@ não aceita a senha por stdin: por um instante ela fica visível ao root
 | `cannot resolve packages.openvpn.net` | IP/gateway/VLAN/DNS errados; teste com `pct enter <id>` e `ping` |
 | CT não sobe após reboot do host (`/dev/net/tun` ausente) | `lsmod \| grep tun` e `cat /etc/modules-load.d/tun.conf` no host |
 | VPN conecta mas não passa tráfego | `ls -l /dev/net/tun` dentro do CT; `pct config <id>` deve ter `dev0: /dev/net/tun` |
+| Daemons `openvpn_N` em `off` | `sacli ConfigQuery \| grep ovpndco` deve ser `false`; veja `/var/log/openvpnas.log` no CT |
 | Admin UI não abre | `pct exec <id> -- /usr/local/openvpn_as/scripts/sacli status` |
 
 ## Testes

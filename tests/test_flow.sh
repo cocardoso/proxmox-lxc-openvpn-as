@@ -180,4 +180,12 @@ echo "# real run: network never comes up"
 STUB_PCT_FAIL=exec run_flow "$(default_answers; echo no)"
 assert_contains "network error message" "$OUT" "cannot resolve packages.openvpn.net"
 
+echo "# container installer"
+installer=$(bash -c 'source ./openvpn-as-lxc.sh; container_installer')
+dco_line=$(grep -n 'vpn.server.daemon.ovpndco --value false' <<<"$installer" | cut -d: -f1)
+start_line=$(grep -n '"$SACLI" start' <<<"$installer" | cut -d: -f1)
+assert_ok "installer disables DCO before starting" test -n "$dco_line" -a -n "$start_line"
+[[ -n $dco_line && -n $start_line ]] && ((dco_line < start_line)) && pass || fail "DCO disabled after start"
+assert_ok "installer is valid bash" bash -n <(printf '%s\n' "$installer")
+
 finish

@@ -431,7 +431,7 @@ SACLI=/usr/local/openvpn_as/scripts/sacli
 # shellcheck disable=SC1090
 source "$ENV_FILE"
 rm -f "$ENV_FILE"
-export DEBIAN_FRONTEND=noninteractive
+export DEBIAN_FRONTEND=noninteractive LC_ALL=C.UTF-8
 
 echo "--- Setting the root password"
 printf 'root:%s\n' "$CT_PASSWORD" | chpasswd
@@ -464,8 +464,27 @@ echo "--- Configuring Access Server"
 "$SACLI" --key vpn.server.daemon.udp.port --value "$UDP_PORT" ConfigPut
 # sacli has no stdin option, so the password is briefly visible to root
 # inside this container only.
+# DCO (kernel ovpn module) needs CAP_NET_ADMIN in the host namespace, which an
+# unprivileged LXC lacks: its netlink calls fail and the daemons stop.
+# Without DCO the daemons use /dev/net/tun instead.
+"$SACLI" --key vpn.server.daemon.ovpndco --value false ConfigPut
 "$SACLI" --user openvpn --new_pass "$ADMIN_PASSWORD" SetLocalPassword
-"$SACLI" start
+# The package already started the daemons with DCO on. Restarting cancels their
+# pending queries, so "sacli start" reports errors even when the new daemons
+# come up fine; the status checks below decide instead.
+"$SACLI" start || echo "sacli start reported errors; checking the daemons"
+
+echo "--- Checking the VPN daemons"
+for _ in $(seq 1 15); do
+  status=$("$SACLI" status)
+  grep -q '"openvpn_[0-9]*": "on"' <<<"$status" && ! grep -q '"openvpn_[0-9]*": "off"' <<<"$status" && break
+  sleep 2
+done
+if grep -q '"openvpn_[0-9]*": "off"' <<<"$status" || ! grep -q '"openvpn_[0-9]*": "on"' <<<"$status"; then
+  echo "Some OpenVPN daemons are not running:"
+  grep '"openvpn_' <<<"$status"
+  exit 1
+fi
 
 echo "--- Checking listening ports"
 for _ in $(seq 1 30); do
