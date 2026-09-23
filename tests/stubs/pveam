@@ -4,8 +4,10 @@ case $1 in
   available)
     printf 'system          debian-12-standard_12.12-1_amd64.tar.zst\n'
     [[ -n ${STUB_NO_DEB13:-} ]] || {
-      printf 'system          debian-13-standard_13.0-1_amd64.tar.zst\n'
-      printf 'system          debian-13-standard_13.1-2_amd64.tar.zst\n'
+      # Same layout as the real PVE 9 index, which lists arm64 templates too.
+      printf 'system          debian-13-standard_13.0-1_amd64.tar.zst                      amd64\n'
+      printf 'system          debian-13-standard_13.1-2_amd64.tar.zst                      amd64\n'
+      printf 'system          debian-13-standard_13.1-2_arm64.tar.zst                      arm64\n'
     }
     printf 'system          ubuntu-24.04-standard_24.04-2_amd64.tar.zst\n'
     ;;

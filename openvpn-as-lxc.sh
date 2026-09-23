@@ -16,11 +16,12 @@ BACKTITLE="Proxmox VE - OpenVPN Access Server installer v${SCRIPT_VERSION}"
   AS_REPO_URL="http://packages.openvpn.net/as/debian"
   AS_REPO_SUITE="trixie"
 }
-TEMPLATE_PATTERN='^debian-13-standard_.*\.tar\.(zst|xz|gz)$'
+TEMPLATE_PREFIX="debian-13-standard_"
 WEB_UI_PORT=943
 TUN_MODULES_FILE="/etc/modules-load.d/tun.conf"
 
 DRY_RUN=0
+HOST_ARCH=""
 CT_CREATED=0
 LOG_DIR="${LOG_DIR:-/var/log}"
 LOG_FILE=/dev/null
@@ -288,9 +289,8 @@ preflight() {
     command -v "$cmd" >/dev/null 2>&1 || die "Required command not found: $cmd (is this a Proxmox VE host?)"
   done
 
-  local arch
-  arch=$(dpkg --print-architecture)
-  [[ $arch == amd64 ]] || die "OpenVPN Access Server packages exist only for amd64 on Debian (this host is $arch)."
+  HOST_ARCH=$(dpkg --print-architecture)
+  [[ $HOST_ARCH == amd64 ]] || die "OpenVPN Access Server packages exist only for amd64 on Debian (this host is $HOST_ARCH)."
 
   pve_version_ok || die "Proxmox VE 8.4 or newer is required (found: $(pveversion 2>/dev/null || echo unknown))."
 
@@ -359,11 +359,11 @@ persist_tun_module() {
 }
 
 ensure_template() {
-  local template
+  local template pattern="^${TEMPLATE_PREFIX}.*_${HOST_ARCH}\.tar\.(zst|xz|gz)$"
   msg "Updating the container template index"
   run pveam update
 
-  template=$(pveam available --section system 2>/dev/null | awk '{print $2}' | grep -E "$TEMPLATE_PATTERN" | sort -V | tail -n 1) || true
+  template=$(pveam available --section system 2>/dev/null | awk '{print $2}' | grep -E "$pattern" | sort -V | tail -n 1) || true
   if [[ -z $template ]]; then
     ((DRY_RUN)) && die "Debian 13 template not found in the local index. Run 'pveam update' and try the dry run again."
     die "Debian 13 template not found in 'pveam available'. Is this node on Proxmox VE 8.4 or newer?"
@@ -519,7 +519,7 @@ $( ((DRY_RUN)) && echo "Dry run finished. Nothing was changed." || echo "OpenVPN
   Client UI:    https://$ip:$WEB_UI_PORT/
   Public host:  $PUBLIC_HOST
 
-  Forward these ports from $PUBLIC_HOST to $ip:
+  Forward these ports on your router/firewall to $ip:
     TCP $TCP_PORT   (VPN over TCP; also serves the Client UI)
     UDP $UDP_PORT   (VPN over UDP)
   Keep TCP $WEB_UI_PORT internal unless you really need the Admin UI from outside.
