@@ -283,9 +283,13 @@ preflight() {
   ((EUID == 0)) || die "Run this script as root on the Proxmox VE host."
 
   local cmd
-  for cmd in pct pveam pvesm pvesh pveversion whiptail ip; do
+  for cmd in pct pveam pvesm pvesh pveversion whiptail ip dpkg; do
     command -v "$cmd" >/dev/null 2>&1 || die "Required command not found: $cmd (is this a Proxmox VE host?)"
   done
+
+  local arch
+  arch=$(dpkg --print-architecture)
+  [[ $arch == amd64 ]] || die "OpenVPN Access Server packages exist only for amd64 on Debian (this host is $arch)."
 
   pve_version_ok || die "Proxmox VE 8.1 or newer is required (found: $(pveversion 2>/dev/null || echo unknown))."
 

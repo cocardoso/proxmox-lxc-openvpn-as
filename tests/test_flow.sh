@@ -104,6 +104,11 @@ STUB_PVEVERSION="pve-manager/8.0.4/abc (running kernel: 6.2)" run_flow "" --dry-
 assert_eq "pve 8.0 exits 1" 1 "$STATUS"
 assert_contains "pve version message" "$OUT" "Proxmox VE 8.1 or newer"
 
+echo "# non-amd64 host"
+STUB_ARCH=arm64 run_flow "" --dry-run
+assert_eq "arm64 exits 1" 1 "$STATUS"
+assert_contains "arch message" "$OUT" "only for amd64"
+
 echo "# no rootdir storage"
 STUB_STORAGES_rootdir="" run_flow "$(default_answers)" --dry-run
 assert_eq "no storage exits 1" 1 "$STATUS"
