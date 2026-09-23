@@ -5,12 +5,17 @@
 kind="" text=""
 while (($#)); do
   case $1 in
-    --inputbox | --passwordbox | --menu | --yesno | --msgbox) kind=${1#--}; text=$2; break ;;
+    --inputbox | --passwordbox | --menu | --yesno | --msgbox) kind=${1#--}; text=$2; init=${5-}; break ;;
   esac
   shift
 done
 printf 'whiptail %s %s\n' "$kind" "${text%%$'\n'*}" >>"$STUB_LOG"
 [[ $kind == msgbox ]] && exit 0
+# Real whiptail treats an --inputbox initial text starting with "-" as an option.
+if [[ $kind == inputbox && $init == -* ]]; then
+  echo "$init: unknown option" >&2
+  exit 1
+fi
 
 if [[ ! -s $STUB_ANSWERS ]]; then
   echo "whiptail OUT-OF-ANSWERS" >>"$STUB_LOG"

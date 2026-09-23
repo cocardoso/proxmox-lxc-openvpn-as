@@ -6,9 +6,7 @@ privilegiado** no Proxmox VE e instala o
 
 ## Requisitos
 
-- Proxmox VE **8.1 ou mais novo**, arquitetura **amd64**. O pacote
-  `openvpn-as` só é publicado para amd64. O template Debian 13 exige na
-  prática PVE 8.4+/9.
+- Proxmox VE **8.4 ou mais novo** (o `pct` de versões anteriores recusa Debian 13), arquitetura **amd64**. O pacote
 - Executar como `root` no shell do nó.
 - Acesso à internet a partir do contêiner (`packages.openvpn.net` e `deb.debian.org`).
 - Um IP estático livre na rede da bridge escolhida.

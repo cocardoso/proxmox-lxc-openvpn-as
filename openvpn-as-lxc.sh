@@ -3,7 +3,7 @@
 # OpenVPN Access Server in it, asking every setting through whiptail dialogs.
 #
 # Usage: openvpn-as-lxc.sh [--dry-run] [--help]
-# Run as root on a Proxmox VE 8.1+ node.
+# Run as root on a Proxmox VE 8.4+ node (older pct rejects Debian 13).
 
 SCRIPT_VERSION="1.0.0"
 TITLE="OpenVPN Access Server LXC"
@@ -177,8 +177,8 @@ ask() {
       printf -v "$var" '%s' "$value"
       return 0
     fi
+    # Keep the original default: whiptail would parse a value like "-1" as an option.
     wt_msg "Invalid value: '$value'. $error"
-    default=$value
   done
 }
 
@@ -276,7 +276,7 @@ pve_version_ok() {
   [[ -n $version ]] || return 1
   major=${version%%.*}
   minor=${version#*.}
-  ((major > 8 || (major == 8 && minor >= 1)))
+  ((major > 8 || (major == 8 && minor >= 4)))
 }
 
 preflight() {
@@ -291,7 +291,7 @@ preflight() {
   arch=$(dpkg --print-architecture)
   [[ $arch == amd64 ]] || die "OpenVPN Access Server packages exist only for amd64 on Debian (this host is $arch)."
 
-  pve_version_ok || die "Proxmox VE 8.1 or newer is required (found: $(pveversion 2>/dev/null || echo unknown))."
+  pve_version_ok || die "Proxmox VE 8.4 or newer is required (found: $(pveversion 2>/dev/null || echo unknown))."
 
   if [[ ! -c /dev/net/tun ]]; then
     run modprobe tun
@@ -352,7 +352,10 @@ ensure_template() {
   run pveam update
 
   template=$(pveam available --section system 2>/dev/null | awk '{print $2}' | grep -E "$TEMPLATE_PATTERN" | sort -V | tail -n 1) || true
-  [[ -n $template ]] || die "Debian 13 template not found in 'pveam available'. Is this node on Proxmox VE 8.4 or newer?"
+  if [[ -z $template ]]; then
+    ((DRY_RUN)) && die "Debian 13 template not found in the local index. Run 'pveam update' and try the dry run again."
+    die "Debian 13 template not found in 'pveam available'. Is this node on Proxmox VE 8.4 or newer?"
+  fi
 
   TEMPLATE_VOLID="${TEMPLATE_STORAGE}:vztmpl/${template}"
   if pveam list "$TEMPLATE_STORAGE" 2>/dev/null | awk '{print $1}' | grep -xF "$TEMPLATE_VOLID" >/dev/null; then
@@ -454,10 +457,10 @@ echo "--- Configuring Access Server"
 
 echo "--- Checking listening ports"
 for _ in $(seq 1 30); do
-  ss -Hltn "sport = :$WEB_UI_PORT" | grep -q . && break
+  [[ -n $(ss -Hltn "sport = :$WEB_UI_PORT") ]] && break
   sleep 2
 done
-ss -Hltn "sport = :$WEB_UI_PORT" | grep -q . || { echo "Web UI is not listening on $WEB_UI_PORT"; exit 1; }
+[[ -n $(ss -Hltn "sport = :$WEB_UI_PORT") ]] || { echo "Web UI is not listening on $WEB_UI_PORT"; exit 1; }
 echo "--- Done"
 INSTALLER
 }

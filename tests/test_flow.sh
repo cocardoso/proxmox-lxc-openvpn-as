@@ -77,6 +77,12 @@ run_flow "$(default_answers | sed '11s/.*/192.168.20.300\/24\n192.168.20.50\/24/
 assert_eq "invalid ip flow exits 0" 0 "$STATUS"
 assert_contains "invalid ip warning" "$CALLS" "Invalid value: '192.168.20.300/24'"
 
+echo "# invalid value starting with '-' is asked again, not aborted"
+run_flow "$(default_answers | sed '10s/.*/-1\n20/')" --dry-run
+assert_eq "negative vlan flow exits 0" 0 "$STATUS"
+assert_contains "negative vlan rejected" "$CALLS" "Invalid value: '-1'"
+assert_contains "vlan applied after retry" "$OUT" "tag=20"
+
 echo "# CT ID in use"
 export STUB_USED_IDS=105
 run_flow "$(default_answers | sed '1s/.*/105\n106/')" --dry-run
@@ -100,9 +106,11 @@ assert_contains "missing template message" "$OUT" "Debian 13 template not found"
 assert_not_contains "missing template creates nothing" "$OUT" "pct create"
 
 echo "# old Proxmox VE"
-STUB_PVEVERSION="pve-manager/8.0.4/abc (running kernel: 6.2)" run_flow "" --dry-run
-assert_eq "pve 8.0 exits 1" 1 "$STATUS"
-assert_contains "pve version message" "$OUT" "Proxmox VE 8.1 or newer"
+STUB_PVEVERSION="pve-manager/8.3.5/abc (running kernel: 6.8)" run_flow "" --dry-run
+assert_eq "pve 8.3 exits 1" 1 "$STATUS"
+assert_contains "pve version message" "$OUT" "Proxmox VE 8.4 or newer"
+STUB_PVEVERSION="pve-manager/8.4.1/abc (running kernel: 6.8)" run_flow "$(default_answers)" --dry-run
+assert_eq "pve 8.4 accepted" 0 "$STATUS"
 
 echo "# non-amd64 host"
 STUB_ARCH=arm64 run_flow "" --dry-run
