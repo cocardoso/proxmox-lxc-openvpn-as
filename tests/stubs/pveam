@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+printf 'pveam %s\n' "$*" >>"$STUB_LOG"
+case $1 in
+  available)
+    printf 'system          debian-12-standard_12.12-1_amd64.tar.zst\n'
+    [[ -n ${STUB_NO_DEB13:-} ]] || {
+      printf 'system          debian-13-standard_13.0-1_amd64.tar.zst\n'
+      printf 'system          debian-13-standard_13.1-2_amd64.tar.zst\n'
+    }
+    printf 'system          ubuntu-24.04-standard_24.04-2_amd64.tar.zst\n'
+    ;;
+  list)
+    printf 'NAME                                                         SIZE\n'
+    [[ -n ${STUB_HAS_TEMPLATE:-} ]] && printf '%s:vztmpl/debian-13-standard_13.1-2_amd64.tar.zst 123.45MB\n' "$2"
+    ;;
+esac
+exit 0

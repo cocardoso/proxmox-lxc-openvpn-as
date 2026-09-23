@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Fake whiptail: answers come one per line from $STUB_ANSWERS (a file).
+# "__CANCEL__" simulates Cancel/ESC; for --yesno use "yes" or "no".
+# --msgbox consumes no answer. Every dialog is logged to $STUB_LOG.
+kind="" text=""
+while (($#)); do
+  case $1 in
+    --inputbox | --passwordbox | --menu | --yesno | --msgbox) kind=${1#--}; text=$2; break ;;
+  esac
+  shift
+done
+printf 'whiptail %s %s\n' "$kind" "${text%%$'\n'*}" >>"$STUB_LOG"
+[[ $kind == msgbox ]] && exit 0
+
+if [[ ! -s $STUB_ANSWERS ]]; then
+  echo "whiptail OUT-OF-ANSWERS" >>"$STUB_LOG"
+  exit 1
+fi
+answer=$(head -n 1 "$STUB_ANSWERS")
+sed -i 1d "$STUB_ANSWERS"
+[[ $answer == __CANCEL__ ]] && exit 1
+if [[ $kind == yesno ]]; then
+  [[ $answer == yes ]]
+  exit
+fi
+printf '%s' "$answer" >&2

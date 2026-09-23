@@ -4,7 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 if [[ "${IN_TEST_CONTAINER:-}" != 1 ]]; then
-  exec docker run --rm -e IN_TEST_CONTAINER=1 -v "$PWD":/w -w /w debian:trixie bash tests/run.sh "$@"
+  exec docker run --rm --device /dev/net/tun -e IN_TEST_CONTAINER=1 -v "$PWD":/w -w /w debian:trixie bash tests/run.sh "$@"
 fi
 
 status=0

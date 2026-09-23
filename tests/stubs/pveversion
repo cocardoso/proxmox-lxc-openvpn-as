@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+echo "${STUB_PVEVERSION:-pve-manager/9.0.6/49c767b70aeb6648 (running kernel: 6.14.11-2-pve)}"

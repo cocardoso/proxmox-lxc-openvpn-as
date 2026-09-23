@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+printf '%b' "${STUB_BRIDGES-vmbr0            UP             aa:bb:cc:dd:ee:ff <BROADCAST,MULTICAST,UP,LOWER_UP>\nvmbr1            UP             aa:bb:cc:dd:ee:00 <BROADCAST,MULTICAST,UP,LOWER_UP>\n}"

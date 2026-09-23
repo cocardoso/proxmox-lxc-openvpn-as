@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Fake pvesh: next free id is 105; ids in $STUB_USED_IDS are taken.
+if [[ $* == "get /cluster/nextid --vmid "* ]]; then
+  [[ " ${STUB_USED_IDS:-} " == *" $4 "* ]] && { echo "VM $4 already exists" >&2; exit 2; }
+  echo "$4"; exit 0
+fi
+[[ $* == "get /cluster/nextid" ]] && { echo 105; exit 0; }
+exit 1

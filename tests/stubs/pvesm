@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Fake pvesm status: $STUB_STORAGES_<content> overrides the default table rows.
+printf 'Name             Type     Status           Total            Used       Available        %%\n'
+case "$*" in
+  *vztmpl*) printf '%b' "${STUB_STORAGES_vztmpl-local dir active 98497780 12310340 81137892 12.50%\n}" ;;
+  *rootdir*) printf '%b' "${STUB_STORAGES_rootdir-local-lvm lvmthin active 350000000 10000000 340000000 2.86%\nnfs-slow nfs active 900000000 1000000 899000000 0.1%\nold-disk dir inactive 0 0 0 0%\n}" ;;
+esac

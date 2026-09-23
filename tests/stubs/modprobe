@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+printf 'modprobe %s\n' "$*" >>"$STUB_LOG"
