@@ -42,6 +42,9 @@ Antes de criar, uma tela de resumo pede confirmação.
 
 - Contêiner com `unprivileged: 1`, `features: nesting=1`, `onboot: 1` e
   `dev0: /dev/net/tun` (passthrough do TUN, nativo do PVE 8.1+).
+- No host: `/etc/modules-load.d/tun.conf` com `tun`, para o módulo carregar em
+  todo boot. Não é gravado se o `tun` já estiver em `/etc/modules` ou em
+  `/etc/modules-load.d/`.
 - Repositório oficial `http://packages.openvpn.net/as/debian trixie main`
   com a chave em `/etc/apt/keyrings/as-repository.asc`, e o pacote `openvpn-as`.
 - Configuração via `sacli`: `host.name`, `vpn.server.daemon.tcp.port`,
@@ -81,6 +84,7 @@ não aceita a senha por stdin: por um instante ela fica visível ao root
 | Sintoma | Verificação |
 |---------|-------------|
 | `cannot resolve packages.openvpn.net` | IP/gateway/VLAN/DNS errados; teste com `pct enter <id>` e `ping` |
+| CT não sobe após reboot do host (`/dev/net/tun` ausente) | `lsmod \| grep tun` e `cat /etc/modules-load.d/tun.conf` no host |
 | VPN conecta mas não passa tráfego | `ls -l /dev/net/tun` dentro do CT; `pct config <id>` deve ter `dev0: /dev/net/tun` |
 | Admin UI não abre | `pct exec <id> -- /usr/local/openvpn_as/scripts/sacli status` |
 

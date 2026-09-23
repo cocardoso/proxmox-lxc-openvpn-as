@@ -130,6 +130,23 @@ echo "# unknown option"
 run_flow "" --bogus
 assert_eq "unknown option exits 1" 1 "$STATUS"
 
+echo "# dry run does not persist the tun module"
+rm -f /etc/modules-load.d/tun.conf
+run_flow "$(default_answers)" --dry-run
+assert_contains "dry run shows tun persistence" "$OUT" "[dry-run] tee /etc/modules-load.d/tun.conf"
+assert_fails "dry run writes nothing" test -e /etc/modules-load.d/tun.conf
+
+echo "# real run persists the tun module once"
+run_flow "$(default_answers)"
+assert_eq "tun.conf content" "tun" "$(cat /etc/modules-load.d/tun.conf 2>/dev/null)"
+run_flow "$(default_answers)"
+assert_contains "tun already configured" "$OUT" "tun module already loaded at boot"
+rm -f /etc/modules-load.d/tun.conf
+printf 'loop\ntun\n' >/etc/modules
+run_flow "$(default_answers)"
+assert_fails "tun in /etc/modules is respected" test -e /etc/modules-load.d/tun.conf
+: >/etc/modules
+
 echo "# real run: success, secrets are pushed intact and not logged"
 run_flow "$(default_answers)"
 assert_eq "real run exits 0" 0 "$STATUS"

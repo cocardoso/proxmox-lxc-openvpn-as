@@ -18,6 +18,7 @@ BACKTITLE="Proxmox VE - OpenVPN Access Server installer v${SCRIPT_VERSION}"
 }
 TEMPLATE_PATTERN='^debian-13-standard_.*\.tar\.(zst|xz|gz)$'
 WEB_UI_PORT=943
+TUN_MODULES_FILE="/etc/modules-load.d/tun.conf"
 
 DRY_RUN=0
 CT_CREATED=0
@@ -346,6 +347,17 @@ EOF
   wt_yesno "$summary" 22 || user_abort
 }
 
+# Loads the tun module on every host boot so /dev/net/tun is always there for dev0.
+persist_tun_module() {
+  if grep -qsx 'tun' /etc/modules /etc/modules-load.d/*.conf; then
+    msg_ok "tun module already loaded at boot"
+    return 0
+  fi
+  msg "Loading the tun module at boot ($TUN_MODULES_FILE)"
+  run mkdir -p "${TUN_MODULES_FILE%/*}"
+  printf 'tun\n' | run tee "$TUN_MODULES_FILE"
+}
+
 ensure_template() {
   local template
   msg "Updating the container template index"
@@ -553,6 +565,7 @@ main() {
   fi
   log "openvpn-as-lxc.sh v$SCRIPT_VERSION starting for CT $CTID"
 
+  persist_tun_module
   ensure_template
   create_container
   wait_for_network
