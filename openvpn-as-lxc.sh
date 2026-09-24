@@ -10,7 +10,7 @@
 # Usage: openvpn-as-lxc.sh [--dry-run] [--help]
 # Run as root on a Proxmox VE 8.4+ node (older pct rejects Debian 13).
 
-SCRIPT_VERSION="1.0.0"
+SCRIPT_VERSION="1.1.0"
 TITLE="OpenVPN Access Server LXC"
 BACKTITLE="Proxmox VE - OpenVPN Access Server installer v${SCRIPT_VERSION}"
 
@@ -24,6 +24,8 @@ BACKTITLE="Proxmox VE - OpenVPN Access Server installer v${SCRIPT_VERSION}"
 TEMPLATE_PREFIX="debian-13-standard_"
 WEB_UI_PORT=943
 TUN_MODULES_FILE="/etc/modules-load.d/tun.conf"
+CF_API="https://api.cloudflare.com/client/v4"
+DDNS_UPDATER_PATH="/usr/local/sbin/openvpn-as-ddns"
 
 DRY_RUN=0
 HOST_ARCH=""
@@ -32,6 +34,16 @@ LOG_DIR="${LOG_DIR:-/var/log}"
 LOG_FILE=/dev/null
 WORK_DIR=""
 NET_WAIT_TRIES="${NET_WAIT_TRIES:-30}"
+
+VPN_PROTOCOLS="both"
+TCP_PORT=""
+UDP_PORT=""
+DDNS_ENABLED=0
+DDNS_ZONE=""
+DDNS_RECORD=""
+DDNS_TOKEN=""
+DDNS_OK=1
+CF_ZONE_ID=""
 
 # ---------------------------------------------------------------------------
 # Validators: return 0 when the value is acceptable.
@@ -95,6 +107,16 @@ is_dns_list() {
   for server in "${servers[@]}"; do
     is_ipv4 "$server" || return 1
   done
+}
+
+is_domain() {
+  [[ ${1-} == *.* ]] && ! is_ipv4 "$1" && is_fqdn_or_ip "$1"
+}
+
+# The DNS record must be a name inside the zone (not the zone apex).
+is_record_in_zone() {
+  local record=${1,,} zone=${DDNS_ZONE,,}
+  is_domain "$record" && [[ $record == *".$zone" ]]
 }
 
 is_disk_size() {
@@ -244,6 +266,64 @@ select_bridge() {
   BRIDGE=$choice
 }
 
+# cf_get TOKEN PATH: GET on the Cloudflare API. The token goes to curl through
+# a 0600 header file, never on the command line.
+cf_get() {
+  local header="$WORK_DIR/cf-auth" response
+  (
+    umask 077
+    printf 'Authorization: Bearer %s\n' "$1" >"$header"
+  )
+  response=$(curl -sS --max-time 15 -H @"$header" "$CF_API$2" 2>/dev/null) || response=""
+  rm -f "$header"
+  printf '%s' "$response"
+}
+
+# cf_json EXPR: decodes the JSON on stdin into $d and prints the Perl EXPR.
+# Perl and JSON::PP are always present on Proxmox VE, jq is not.
+cf_json() {
+  perl -MJSON::PP -e 'local $/; my $d = eval { decode_json(<STDIN>) } or exit 1;
+    my $out = eval $ARGV[0]; exit 1 if $@; print $out // ""' "$1"
+}
+
+# Returns 0 when the token can read the zone and its DNS records; sets CF_ZONE_ID.
+# shellcheck disable=SC2016 # the single-quoted arguments are Perl code
+cloudflare_token_ok() {
+  local token=$1 zone=$2 response
+  response=$(cf_get "$token" "/zones?name=$zone")
+  CF_ZONE_ID=$(cf_json '$d->{success} ? ($d->{result}[0]{id} // "") : ""' <<<"$response") || CF_ZONE_ID=""
+  [[ -n $CF_ZONE_ID ]] || return 1
+  response=$(cf_get "$token" "/zones/$CF_ZONE_ID/dns_records?per_page=1")
+  [[ $(cf_json '$d->{success} ? 1 : 0' <<<"$response" || true) == 1 ]]
+}
+
+# Prints the A, AAAA and CNAME records of NAME as "TYPE CONTENT (proxied|DNS only)".
+# shellcheck disable=SC2016 # the single-quoted arguments are Perl code
+cloudflare_records() {
+  local response
+  response=$(cf_get "$1" "/zones/$CF_ZONE_ID/dns_records?name=$2")
+  cf_json '$d->{success} or die; join "", map { "$_->{type} $_->{content} (" . ($_->{proxied} ? "proxied" : "DNS only") . ")\n" }
+    grep { $_->{type} =~ /^(A|AAAA|CNAME)$/ } @{ $d->{result} }' <<<"$response"
+}
+
+# Returns 0 when DDNS_RECORD can be managed by the updater: it does not exist
+# yet, or it is a single A record the user agrees to take over.
+ddns_record_usable() {
+  local records a_count
+  if ! records=$(cloudflare_records "$DDNS_TOKEN" "$DDNS_RECORD"); then
+    wt_msg "Could not read the DNS records of $DDNS_RECORD from Cloudflare."
+    return 1
+  fi
+  a_count=$(grep -c '^A ' <<<"$records" || true)
+  if grep -qE '^(AAAA|CNAME) ' <<<"$records" || ((a_count > 1)); then
+    wt_msg "$DDNS_RECORD already has records the dynamic DNS updater cannot manage:\n\n$records\n\nChoose another name."
+    return 1
+  fi
+  if [[ -n $records ]]; then
+    wt_yesno "$DDNS_RECORD already exists:\n\n$records\n\nIt will point to this network's public IP and be set to DNS only (not proxied). Use it?" 14 || return 1
+  fi
+}
+
 # ---------------------------------------------------------------------------
 # Steps
 # ---------------------------------------------------------------------------
@@ -341,9 +421,45 @@ collect_settings() {
   ask DNS "DNS servers (space separated):" "$GATEWAY" is_dns_list "Use IPv4 addresses separated by spaces."
 
   ask_password ADMIN_PASSWORD "OpenVPN AS admin ('openvpn' user) password"
-  ask PUBLIC_HOST "Public hostname or IP that VPN clients will connect to:" "${IP_CIDR%/*}" is_fqdn_or_ip "Use a DNS name or an IPv4 address."
-  ask TCP_PORT "OpenVPN daemon TCP port:" "443" is_vpn_tcp_port "Use 1-65535 (not $WEB_UI_PORT, used by the web UI)."
+  VPN_PROTOCOLS=$(wt_menu "VPN protocols. Pick 'UDP only' when your router can forward only UDP:" \
+    both "UDP + TCP (TCP as fallback)" \
+    udp "UDP only") || user_abort
+  if [[ $VPN_PROTOCOLS == both ]]; then
+    ask TCP_PORT "OpenVPN daemon TCP port:" "443" is_vpn_tcp_port "Use 1-65535 (not $WEB_UI_PORT, used by the web UI)."
+  fi
   ask UDP_PORT "OpenVPN daemon UDP port:" "1194" is_port "Use 1-65535."
+
+  collect_ddns
+  if ((DDNS_ENABLED)); then
+    PUBLIC_HOST=$DDNS_RECORD
+  else
+    ask PUBLIC_HOST "Public hostname or IP that VPN clients will connect to:" "${IP_CIDR%/*}" is_fqdn_or_ip "Use a DNS name or an IPv4 address."
+  fi
+}
+
+# Optional Cloudflare dynamic DNS: a record kept pointing to the public IP.
+collect_ddns() {
+  DDNS_ENABLED=0
+  wt_yesno "Keep a Cloudflare DNS record pointing to this network's public IP (dynamic DNS)?\n\nUse it when your public IP changes. You need a Cloudflare API token with Zone:Read and DNS:Edit permissions on the zone." 14 || return 0
+
+  ask DDNS_ZONE "Cloudflare zone (e.g. example.com):" "" is_domain "Use a domain name such as example.com."
+  DDNS_ZONE=${DDNS_ZONE,,}
+  ask_ddns_record
+  while true; do
+    DDNS_TOKEN=$(wt_password "Cloudflare API token for $DDNS_ZONE (leave empty to skip dynamic DNS):") || user_abort
+    [[ -z $DDNS_TOKEN ]] && return 0
+    cloudflare_token_ok "$DDNS_TOKEN" "$DDNS_ZONE" && break
+    wt_msg "Cloudflare rejected the token, or it cannot read the DNS records of $DDNS_ZONE. Check the token permissions and try again."
+  done
+  until ddns_record_usable; do
+    ask_ddns_record
+  done
+  DDNS_ENABLED=1
+}
+
+ask_ddns_record() {
+  ask DDNS_RECORD "DNS record for the VPN clients (created as DNS only, not proxied):" "vpn.$DDNS_ZONE" is_record_in_zone "Use a name inside $DDNS_ZONE, such as vpn.$DDNS_ZONE."
+  DDNS_RECORD=${DDNS_RECORD,,}
 }
 
 confirm_settings() {
@@ -358,7 +474,8 @@ CPU / Memory:    $CORES cores / $MEMORY_MB MiB
 Network:         $BRIDGE${VLAN:+ (VLAN $VLAN)}, $IP_CIDR via $GATEWAY
 DNS:             $DNS
 Public host:     $PUBLIC_HOST
-VPN ports:       TCP $TCP_PORT, UDP $UDP_PORT
+Dynamic DNS:     $( ((DDNS_ENABLED)) && echo "Cloudflare, $DDNS_RECORD" || echo "off")
+VPN ports:       UDP $UDP_PORT${TCP_PORT:+, TCP $TCP_PORT}
 Mode:            $( ((DRY_RUN)) && echo "DRY RUN (nothing is changed)" || echo "create for real")
 
 Create the container?
@@ -480,8 +597,16 @@ done
 
 echo "--- Configuring Access Server"
 "$SACLI" --key host.name --value "$PUBLIC_HOST" ConfigPut
-"$SACLI" --key vpn.server.daemon.tcp.port --value "$TCP_PORT" ConfigPut
-"$SACLI" --key vpn.server.daemon.udp.port --value "$UDP_PORT" ConfigPut
+if [[ $VPN_PROTOCOLS == udp ]]; then
+  # A single UDP daemon, like the Admin UI "UDP" protocol setting.
+  "$SACLI" --key vpn.server.daemon.enable --value false ConfigPut
+  "$SACLI" --key vpn.daemon.0.listen.protocol --value udp ConfigPut
+  "$SACLI" --key vpn.daemon.0.listen.port --value "$UDP_PORT" ConfigPut
+  "$SACLI" --key vpn.server.port_share.enable --value false ConfigPut
+else
+  "$SACLI" --key vpn.server.daemon.tcp.port --value "$TCP_PORT" ConfigPut
+  "$SACLI" --key vpn.server.daemon.udp.port --value "$UDP_PORT" ConfigPut
+fi
 # sacli has no stdin option, so the password is briefly visible to root
 # inside this container only.
 # DCO (kernel ovpn module) needs CAP_NET_ADMIN in the host namespace, which an
@@ -512,8 +637,137 @@ for _ in $(seq 1 30); do
   sleep 2
 done
 [[ -n $(ss -Hltn "sport = :$WEB_UI_PORT") ]] || { echo "Web UI is not listening on $WEB_UI_PORT"; exit 1; }
+
+if [[ $DDNS_ENABLED == 1 ]]; then
+  echo "--- Setting up Cloudflare dynamic DNS"
+  apt-get -y install curl jq
+  (
+    umask 077
+    printf 'DDNS_ZONE=%q\nDDNS_RECORD=%q\nDDNS_TOKEN=%q\n' "$DDNS_ZONE" "$DDNS_RECORD" "$DDNS_TOKEN" \
+      >/etc/openvpn-as-ddns.conf
+  )
+  cat >/etc/systemd/system/openvpn-as-ddns.service <<'UNIT'
+[Unit]
+Description=Update the Cloudflare DNS record of OpenVPN Access Server
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/openvpn-as-ddns
+UNIT
+  cat >/etc/systemd/system/openvpn-as-ddns.timer <<'UNIT'
+[Unit]
+Description=Run openvpn-as-ddns every 5 minutes
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=5min
+
+[Install]
+WantedBy=timers.target
+UNIT
+  systemctl daemon-reload
+  systemctl enable --now openvpn-as-ddns.timer
+fi
 echo "--- Done"
 INSTALLER
+}
+
+# Prints the dynamic DNS updater installed in the container. It keeps a
+# Cloudflare A record (DNS only) pointing to the public IPv4 of the network.
+ddns_updater() {
+  cat <<'DDNS'
+#!/usr/bin/env bash
+# Keeps a Cloudflare DNS A record (DNS only) pointing to this network's public
+# IPv4. Installed by openvpn-as-lxc.sh and run by openvpn-as-ddns.timer.
+set -euo pipefail
+
+CONF=${OPENVPN_AS_DDNS_CONF:-/etc/openvpn-as-ddns.conf}
+API=https://api.cloudflare.com/client/v4
+
+# shellcheck disable=SC1090
+source "$CONF"
+: "${DDNS_ZONE:?}" "${DDNS_RECORD:?}" "${DDNS_TOKEN:?}"
+
+# cf METHOD PATH [JSON]: calls the API. The token reaches curl through a file
+# descriptor, so it never shows up in the process list.
+cf() {
+  local method=$1 path=$2 body=${3-}
+  if [[ -n $body ]]; then
+    curl -sS --max-time 20 -X "$method" -H @<(printf 'Authorization: Bearer %s\n' "$DDNS_TOKEN") \
+      -H 'Content-Type: application/json' --data "$body" "$API$path"
+  else
+    curl -sS --max-time 20 -X "$method" -H @<(printf 'Authorization: Bearer %s\n' "$DDNS_TOKEN") "$API$path"
+  fi
+}
+
+# check RESPONSE WHAT: exits with the API error messages unless it succeeded.
+check() {
+  if ! jq -e '.success == true' >/dev/null 2>&1 <<<"$1"; then
+    echo "Cloudflare API error while $2: $(jq -r '[.errors[]?.message] | join("; ")' <<<"$1" 2>/dev/null || echo "$1")" >&2
+    exit 1
+  fi
+}
+
+is_ipv4() {
+  local octet
+  [[ ${1-} =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]] || return 1
+  for octet in "${BASH_REMATCH[@]:1}"; do
+    ((10#$octet <= 255)) || return 1
+  done
+}
+
+public_ip() {
+  local ip
+  ip=$(curl -4 -sS --max-time 10 https://api.ipify.org 2>/dev/null) || ip=""
+  if ! is_ipv4 "$ip"; then
+    ip=$(curl -4 -sS --max-time 10 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | sed -n 's/^ip=//p') || ip=""
+  fi
+  if ! is_ipv4 "$ip"; then
+    echo "Could not detect the public IPv4 address." >&2
+    exit 1
+  fi
+  printf '%s\n' "$ip"
+}
+
+ip=$(public_ip)
+
+response=$(cf GET "/zones?name=$DDNS_ZONE")
+check "$response" "looking up the zone $DDNS_ZONE"
+zone_id=$(jq -r '.result[0].id // empty' <<<"$response")
+if [[ -z $zone_id ]]; then
+  echo "Zone $DDNS_ZONE not found, or the token cannot see it." >&2
+  exit 1
+fi
+
+response=$(cf GET "/zones/$zone_id/dns_records?name=$DDNS_RECORD")
+check "$response" "reading the record $DDNS_RECORD"
+# Only a single A record can be managed: a CNAME blocks it, an AAAA would send
+# IPv6 clients elsewhere and extra A records would keep answering old IPs.
+if ! jq -e '[.result[] | select(.type == "AAAA" or .type == "CNAME")] == [] and ([.result[] | select(.type == "A")] | length) <= 1' >/dev/null <<<"$response"; then
+  echo "$DDNS_RECORD has CNAME/AAAA or several A records; leave a single A record (or none)." >&2
+  exit 1
+fi
+record=$(jq -c '[.result[] | select(.type == "A")][0] // {}' <<<"$response")
+record_id=$(jq -r '.id // empty' <<<"$record")
+current_ip=$(jq -r '.content // empty' <<<"$record")
+proxied=$(jq -r '.proxied // false' <<<"$record")
+
+# VPN traffic cannot go through the Cloudflare proxy, so the record is DNS only.
+body=$(jq -nc --arg name "$DDNS_RECORD" --arg ip "$ip" '{type: "A", name: $name, content: $ip, ttl: 60, proxied: false}')
+if [[ -z $record_id ]]; then
+  response=$(cf POST "/zones/$zone_id/dns_records" "$body")
+  check "$response" "creating the record $DDNS_RECORD"
+  echo "Created $DDNS_RECORD -> $ip"
+elif [[ $current_ip == "$ip" && $proxied == false ]]; then
+  echo "$DDNS_RECORD already points to $ip"
+else
+  response=$(cf PATCH "/zones/$zone_id/dns_records/$record_id" "$body")
+  check "$response" "updating the record $DDNS_RECORD"
+  echo "Updated $DDNS_RECORD: $current_ip -> $ip"
+fi
+DDNS
 }
 
 # Writes the installer settings as shell-quoted assignments, readable only by root.
@@ -522,8 +776,8 @@ write_env_file() {
   (
     umask 077
     : >"$file"
-    for name in CT_PASSWORD ADMIN_PASSWORD PUBLIC_HOST TCP_PORT UDP_PORT WEB_UI_PORT \
-      AS_REPO_KEY_URL AS_REPO_URL AS_REPO_SUITE; do
+    for name in CT_PASSWORD ADMIN_PASSWORD PUBLIC_HOST VPN_PROTOCOLS TCP_PORT UDP_PORT WEB_UI_PORT \
+      AS_REPO_KEY_URL AS_REPO_URL AS_REPO_SUITE DDNS_ENABLED DDNS_ZONE DDNS_RECORD DDNS_TOKEN; do
       printf '%s=%q\n' "$name" "${!name}" >>"$file"
     done
   )
@@ -537,6 +791,10 @@ install_openvpn_as() {
   run pct push "$CTID" "$env_file" /root/ovpn-install.env --perms 0600
   run pct push "$CTID" "$installer" /root/ovpn-install.sh --perms 0700
   rm -f "$env_file"
+  if ((DDNS_ENABLED)); then
+    ddns_updater >"$WORK_DIR/openvpn-as-ddns"
+    run pct push "$CTID" "$WORK_DIR/openvpn-as-ddns" "$DDNS_UPDATER_PATH" --perms 0755
+  fi
 
   msg "Installing OpenVPN Access Server (this takes a few minutes, log: $LOG_FILE)"
   if ! run pct exec "$CTID" -- bash /root/ovpn-install.sh; then
@@ -547,8 +805,24 @@ install_openvpn_as() {
   msg_ok "OpenVPN Access Server installed"
 }
 
+# Runs the first dynamic DNS update. A failure is only a warning: the VPN works
+# and the timer keeps retrying every 5 minutes.
+start_ddns() {
+  msg "Updating the Cloudflare DNS record $DDNS_RECORD"
+  if run pct exec "$CTID" -- systemctl start openvpn-as-ddns.service; then
+    msg_ok "Dynamic DNS is active ($DDNS_RECORD, checked every 5 minutes)"
+  else
+    DDNS_OK=0
+  fi
+}
+
 print_summary() {
-  local ip=${IP_CIDR%/*}
+  local ip=${IP_CIDR%/*} forwards
+  forwards="    UDP $UDP_PORT   (VPN over UDP)"
+  if [[ -n $TCP_PORT ]]; then
+    forwards="    TCP $TCP_PORT   (VPN over TCP; also serves the Client UI)
+$forwards"
+  fi
   cat <<EOF
 
 $( ((DRY_RUN)) && echo "Dry run finished. Nothing was changed." || echo "OpenVPN Access Server is ready.")
@@ -556,15 +830,19 @@ $( ((DRY_RUN)) && echo "Dry run finished. Nothing was changed." || echo "OpenVPN
   Container:    $CTID ($CT_HOSTNAME)
   Admin UI:     https://$ip:$WEB_UI_PORT/admin   (user: openvpn)
   Client UI:    https://$ip:$WEB_UI_PORT/
-  Public host:  $PUBLIC_HOST
+  Public host:  $PUBLIC_HOST$( ((DDNS_ENABLED)) && echo "   (Cloudflare dynamic DNS)")
 
   Forward these ports on your router/firewall to $ip:
-    TCP $TCP_PORT   (VPN over TCP; also serves the Client UI)
-    UDP $UDP_PORT   (VPN over UDP)
+$forwards
   Keep TCP $WEB_UI_PORT internal unless you really need the Admin UI from outside.
 
   Log: $( ((DRY_RUN)) && echo "none (dry run)" || echo "$LOG_FILE")
 EOF
+  if ((!DDNS_OK)); then
+    printf '\n  WARNING: the first dynamic DNS update failed. The timer retries every 5 minutes.\n'
+    printf '  Check that the token has DNS:Edit on %s, then see:\n' "$DDNS_ZONE"
+    printf '    pct exec %s -- journalctl -u openvpn-as-ddns\n' "$CTID"
+  fi
 }
 
 on_err() {
@@ -610,6 +888,9 @@ main() {
   create_container
   wait_for_network
   install_openvpn_as
+  if ((DDNS_ENABLED)); then
+    start_ddns
+  fi
   print_summary
 }
 

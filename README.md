@@ -50,8 +50,10 @@ As always, read a script before piping it into a root shell.
 | IPv4/CIDR and gateway | required (static IP) |
 | DNS servers | the gateway |
 | Admin (`openvpn` user) password | — (min. 8 characters) |
-| Public hostname or IP | the container IP (change it to your public DNS name) |
-| VPN daemon TCP / UDP port | 443 / 1194 |
+| VPN protocols | UDP + TCP, or UDP only |
+| VPN daemon TCP / UDP port | 443 / 1194 (no TCP port in UDP-only mode) |
+| Cloudflare dynamic DNS | off (see [Dynamic DNS](#dynamic-dns-optional)) |
+| Public hostname or IP | the container IP; with dynamic DNS, the DNS record |
 
 A summary screen asks for confirmation before anything is created.
 
@@ -71,8 +73,9 @@ Inside the **container**:
 - Upgrades the base system.
 - Adds the official repository (`http://packages.openvpn.net/as/debian trixie main`)
   and installs `openvpn-as`.
-- Configures it with `sacli`: `host.name`, the TCP/UDP daemon ports and the
-  `openvpn` user password.
+- Configures it with `sacli`: `host.name`, the VPN protocols and ports, and the
+  `openvpn` user password. In UDP-only mode Access Server runs a single UDP
+  daemon and turns off TCP port sharing, so the client profiles contain only UDP.
 - **Turns off DCO** (`vpn.server.daemon.ovpndco=false`). Access Server 3.x enables
   Data Channel Offload by default. The kernel `ovpn` module needs `CAP_NET_ADMIN`
   in the host namespace, so in an unprivileged container its netlink calls fail
@@ -90,14 +93,78 @@ When it finishes, the script prints the URLs:
 | Port | Purpose | Expose to the internet? |
 |------|---------|-------------------------|
 | UDP 1194 (or your choice) | VPN over UDP (preferred) | Yes — port forward |
-| TCP 443 (or your choice) | VPN over TCP + Client UI | Yes — port forward |
-| TCP 943 | Admin UI and Client UI | No — keep it internal |
+| TCP 443 (or your choice) | VPN over TCP + Client UI (not used in UDP-only mode) | Yes — port forward |
+| TCP 943 | Admin UI and Client UI | No — keep it internal, or see [Web portal through Cloudflare Tunnel](#web-portal-through-cloudflare-tunnel-optional) |
+
+If your ISP or router blocks inbound TCP 80/443, choose **UDP only** and
+forward just the UDP port.
+
+## Dynamic DNS (optional)
+
+If your public IP changes, the script can keep a Cloudflare DNS record pointing
+to it, so the client profiles keep working.
+
+1. Your domain must use Cloudflare DNS.
+2. Create an API token in *My Profile → API Tokens → Create Token → Create
+   Custom Token* with these permissions, limited to your zone:
+   - **Zone → Zone → Read**
+   - **Zone → DNS → Edit**
+3. Answer **Yes** to the dynamic DNS question and give the zone (e.g.
+   `example.com`), the record name (e.g. `vpn.example.com`, not the zone apex)
+   and the token. The script checks the token before creating anything. Leave
+   the token empty to skip dynamic DNS.
+4. If the name already has a single `A` record, the script shows it and asks
+   before taking it over. If it has a `CNAME`, an `AAAA` or several `A`
+   records, choose another name.
+
+What gets installed in the container:
+
+- `/usr/local/sbin/openvpn-as-ddns`: detects the public IPv4 (`api.ipify.org`,
+  then `1.1.1.1/cdn-cgi/trace`), then creates or updates the `A` record. The
+  record is always **DNS only**, because the Cloudflare proxy cannot carry VPN
+  traffic; an existing proxied record is switched to DNS only. TTL is 60 s.
+- `/etc/openvpn-as-ddns.conf` (mode `0600`) with the zone, the record and the token.
+- `openvpn-as-ddns.timer`, which runs the updater 1 minute after boot and then
+  every 5 minutes. The API is only written to when the IP changes.
+
+The record name becomes the Access Server public hostname (`host.name`), so it
+is what the client profiles connect to.
+
+```bash
+pct exec <id> -- systemctl list-timers openvpn-as-ddns.timer   # next run
+pct exec <id> -- journalctl -u openvpn-as-ddns                  # results
+pct exec <id> -- /usr/local/sbin/openvpn-as-ddns                # run now
+```
+
+If the first update fails during the installation, the VPN is still installed
+and the summary shows a warning; the timer keeps retrying.
+
+## Web portal through Cloudflare Tunnel (optional)
+
+If you already run `cloudflared`, you can publish the Admin and Client UIs
+without opening TCP ports. The VPN itself still needs the UDP port forward:
+Cloudflare Tunnel public hostnames only carry HTTP(S) and do not carry UDP.
+
+Add a *public hostname* (published application) to your tunnel:
+
+| Field | Value |
+|-------|-------|
+| Hostname | e.g. `vpn-portal.example.com` |
+| Service | `HTTPS` → `<container-ip>:943` |
+| Additional settings → TLS | **No TLS Verify: on** (Access Server uses a self-signed certificate) |
+
+- Use a **different name** from the dynamic DNS record. The portal name points
+  to the tunnel (proxied); the VPN name must point to your public IP (DNS only).
+- Protect at least `/admin` with a Cloudflare Access application.
+- Users log in to the portal to download their profile; the profile connects
+  to the VPN name, not to the portal.
 
 ## Security notes
 
-- Passwords are never shown, logged or passed on the host command line. They
-  travel in a `0600` file copied with `pct push`, which the installer reads and
-  deletes right away.
+- Passwords and the Cloudflare token are never shown, logged or passed on a
+  command line on the host. They travel in a `0600` file copied with
+  `pct push`, which the installer reads and deletes right away. The updater
+  sends the token to `curl` through a file descriptor.
 - One exception: `sacli SetLocalPassword` has no stdin option, so the admin
   password is briefly visible to root **inside** the container.
 - The Access Server web certificate is self-signed. Replace it (for example,
@@ -115,6 +182,7 @@ When it finishes, the script prints the URLs:
 | VPN daemons `openvpn_N` are `off` | `sacli ConfigQuery \| grep ovpndco` must be `false`. See `/var/log/openvpnas.log` in the container. |
 | Container does not start after a host reboot | `lsmod \| grep tun` and `cat /etc/modules-load.d/tun.conf` on the host. |
 | Clients connect but no traffic passes | `pct config <id>` must show `dev0: /dev/net/tun`. |
+| Dynamic DNS record not updated | `pct exec <id> -- journalctl -u openvpn-as-ddns`; check the token permissions (Zone Read + DNS Edit on the zone). |
 | Admin UI does not load | `pct exec <id> -- /usr/local/openvpn_as/scripts/sacli status` |
 
 ## Tested on
@@ -134,7 +202,10 @@ stubs in `tests/stubs`. They cover:
 - input validation, cancellation and retries;
 - passwords with special characters;
 - a missing template, storage or bridge, and too-old Proxmox VE versions;
-- rollback after a failure, and that no password reaches the logs;
+- rollback after a failure, and that no password or token reaches the logs;
+- UDP-only mode and the Cloudflare dynamic DNS flow, including the updater
+  against a fake Cloudflare API (create, update, unchanged, proxied record,
+  conflicting records, IP fallback, API errors);
 - the `bash -c "$(curl …)"` entry point.
 
 They do not replace a run on a real node.

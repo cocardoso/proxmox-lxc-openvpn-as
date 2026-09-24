@@ -44,4 +44,15 @@ assert_fails  "zero"                is_positive_int 0
 assert_fails  "negative"            is_positive_int -1
 assert_fails  "decimal"             is_positive_int 1.5
 
+assert_ok     "domain"              is_domain example.com.br
+assert_fails  "domain single label" is_domain localhost
+assert_fails  "domain is ip"        is_domain 203.0.113.7
+
+DDNS_ZONE=example.com.br
+assert_ok     "record in zone"      is_record_in_zone vpn.example.com.br
+assert_fails  "zone apex"           is_record_in_zone example.com.br
+assert_ok     "record upper-case"   is_record_in_zone VPN.Example.com.br
+assert_fails  "record other zone"   is_record_in_zone vpn.other.com
+assert_fails  "suffix trick"        is_record_in_zone vpnexample.com.br
+
 finish

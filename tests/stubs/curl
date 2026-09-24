@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# Fake curl: emulates the public-IP services and the few Cloudflare API v4
+# endpoints the scripts use. DNS records live in $STUB_CF_DIR/record, one per
+# line: "<name> <content> <proxied> [type]". Every call is logged to $STUB_LOG.
+printf 'curl %s\n' "$*" >>"${STUB_LOG:-/dev/null}"
+
+method=GET url="" data="" auth=""
+while (($#)); do
+  case $1 in
+    -X) method=$2; shift ;;
+    --data | -d) data=$2; shift ;;
+    -H)
+      if [[ $2 == @* ]]; then
+        auth=$(grep -i '^Authorization:' "${2#@}")
+      elif [[ $2 == [Aa]uthorization:* ]]; then
+        auth=$2
+      fi
+      shift
+      ;;
+    --max-time) shift ;;
+    http*) url=$1 ;;
+  esac
+  shift
+done
+
+case $url in
+  https://api.ipify.org*)
+    [[ -n ${STUB_IPIFY_FAIL:-} ]] && exit 7
+    echo "$STUB_PUBLIC_IP"
+    exit 0
+    ;;
+  https://1.1.1.1/cdn-cgi/trace)
+    printf 'fl=1\nip=%s\nts=1\n' "$STUB_PUBLIC_IP"
+    exit 0
+    ;;
+esac
+
+api=https://api.cloudflare.com/client/v4
+zid=0123456789abcdef0123456789abcdef
+rid=fedcba9876543210fedcba9876543210
+ok() { printf '{"success":true,"errors":[],"result":%s}\n' "$1"; }
+
+if [[ ${auth#*Bearer } != "${STUB_CF_TOKEN:-}" ]]; then
+  echo '{"success":false,"errors":[{"code":10000,"message":"Authentication error"}],"result":null}'
+  exit 0
+fi
+
+case "$method $url" in
+  "GET $api/zones?name=${STUB_CF_ZONE:-}") ok "[{\"id\":\"$zid\",\"name\":\"$STUB_CF_ZONE\"}]" ;;
+  "GET $api/zones?name="*) ok "[]" ;;
+  "GET $api/zones/$zid/dns_records"*)
+    # Records are lines "<name> <content> <proxied> [type]"; filters: name=, type=.
+    want_name=$(sed -n 's/.*[?&]name=\([^&]*\).*/\1/p' <<<"$url")
+    want_type=$(sed -n 's/.*[?&]type=\([^&]*\).*/\1/p' <<<"$url")
+    items=()
+    if [[ -f $STUB_CF_DIR/record ]]; then
+      while read -r name content proxied type; do
+        type=${type:-A}
+        [[ -n $want_name && $name != "$want_name" ]] && continue
+        [[ -n $want_type && $type != "$want_type" ]] && continue
+        items+=("{\"id\":\"$rid\",\"type\":\"$type\",\"name\":\"$name\",\"content\":\"$content\",\"proxied\":$proxied}")
+      done <"$STUB_CF_DIR/record"
+    fi
+    ok "[$(IFS=,; echo "${items[*]}")]"
+    ;;
+  "POST $api/zones/$zid/dns_records" | "PATCH $api/zones/$zid/dns_records/$rid")
+    jq -r '"\(.name) \(.content) \(.proxied)"' <<<"$data" >"$STUB_CF_DIR/record"
+    printf '%s\n' "$method" >>"$STUB_CF_DIR/writes"
+    ok "{\"id\":\"$rid\"}"
+    ;;
+  *) echo '{"success":false,"errors":[{"code":7003,"message":"Could not route to the requested endpoint"}],"result":null}' ;;
+esac

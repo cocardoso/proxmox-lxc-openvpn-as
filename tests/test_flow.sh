@@ -10,11 +10,22 @@ export PATH="$ROOT/tests/stubs:$PATH"
 CT_PASS="Ct'root \"pa\$\$ :x"
 ADMIN_PASS='Adm!n $(id) `x` ;&|*'
 
-# Default answers, one per dialog (template storage is auto-selected).
+CF_TOKEN='cf-Token_with$pecial"chars'
+export STUB_CF_TOKEN=$CF_TOKEN STUB_CF_ZONE=example.com.br STUB_PUBLIC_IP=203.0.113.7
+
+# Default answers, one per dialog (template storage is auto-selected):
+# lines 16-21 are protocols, TCP port, UDP port, DDNS yes/no, public host, confirm.
 default_answers() {
   printf '%s\n' 105 openvpn-as "$CT_PASS" "$CT_PASS" local-lvm 8 2 2048 vmbr1 20 \
     192.168.20.50/24 192.168.20.1 "1.1.1.1 9.9.9.9" "$ADMIN_PASS" "$ADMIN_PASS" \
-    vpn.example.com 443 1194 yes
+    both 443 1194 no vpn.example.com yes
+}
+
+# Answers for a run with Cloudflare DDNS on (no public host question).
+ddns_answers() {
+  printf '%s\n' 105 openvpn-as "$CT_PASS" "$CT_PASS" local-lvm 8 2 2048 vmbr1 20 \
+    192.168.20.50/24 192.168.20.1 "1.1.1.1 9.9.9.9" "$ADMIN_PASS" "$ADMIN_PASS" \
+    both 443 1194 yes example.com.br vpn.example.com.br "$CF_TOKEN" yes
 }
 
 # run_flow ANSWERS_TEXT [script args...]  -> sets OUT, STATUS, CALLS
@@ -26,7 +37,9 @@ run_flow() {
   printf '%s' "$answers" >"$tmp/answers"
   : >"$tmp/calls"
   mkdir -p "$tmp/pushed" "$tmp/log"
-  OUT=$(STUB_ANSWERS="$tmp/answers" STUB_LOG="$tmp/calls" STUB_PUSH_DIR="$tmp/pushed" \
+  mkdir -p "$tmp/cf"
+  [[ -n ${STUB_CF_RECORDS-} ]] && printf '%b' "$STUB_CF_RECORDS" >"$tmp/cf/record"
+  OUT=$(STUB_ANSWERS="$tmp/answers" STUB_LOG="$tmp/calls" STUB_PUSH_DIR="$tmp/pushed" STUB_CF_DIR="$tmp/cf" \
     LOG_DIR="$tmp/log" NET_WAIT_TRIES=1 timeout 20 bash ./openvpn-as-lxc.sh "$@" 2>&1)
   STATUS=$?
   CALLS=$(cat "$tmp/calls")
@@ -70,6 +83,51 @@ run_flow_oneliner() {
 run_flow_oneliner
 assert_eq "one-liner dry run exits 0" 0 "$STATUS"
 assert_contains "one-liner creates container" "$OUT" "[dry-run] pct create 105"
+
+echo "# UDP only skips the TCP port and forwards only UDP"
+run_flow "$(default_answers | sed '16s/.*/udp/; 17d')" --dry-run
+assert_eq "udp only exits 0" 0 "$STATUS"
+assert_not_contains "no TCP port question" "$CALLS" "OpenVPN daemon TCP port"
+assert_contains "udp forward listed" "$OUT" "UDP 1194"
+assert_not_contains "no tcp forward listed" "$OUT" "TCP 443"
+
+echo "# DDNS: token checked on the host, record name becomes the public host"
+run_flow "$(ddns_answers)" --dry-run
+assert_eq "ddns dry run exits 0" 0 "$STATUS"
+assert_not_contains "no public host question" "$CALLS" "Public hostname or IP"
+assert_contains "public host is the ddns record" "$OUT" "Public host:  vpn.example.com.br"
+assert_contains "token verified against the zone" "$CALLS" "curl -sS --max-time 15 -H @"
+assert_not_contains "token not in output" "$OUT" "$CF_TOKEN"
+assert_not_contains "token not in any argv" "$CALLS" "$CF_TOKEN"
+
+echo "# DDNS: rejected token is asked again"
+run_flow "$(ddns_answers | sed '22i bad-token')" --dry-run
+assert_eq "retry token exits 0" 0 "$STATUS"
+assert_contains "token rejected message" "$CALLS" "Cloudflare rejected the token"
+
+echo "# DDNS: existing A record needs confirmation"
+STUB_CF_RECORDS='vpn.example.com.br 198.51.100.9 true\n' run_flow "$(ddns_answers | sed '22a yes')" --dry-run
+assert_eq "existing A confirmed exits 0" 0 "$STATUS"
+assert_contains "existing A shown" "$CALLS" "whiptail yesno vpn.example.com.br already exists:"
+
+echo "# DDNS: declining the overwrite asks for another name"
+STUB_CF_RECORDS='vpn.example.com.br 198.51.100.9 true\n' run_flow "$(ddns_answers | sed '22a no\nvpn2.example.com.br')" --dry-run
+assert_eq "declined overwrite exits 0" 0 "$STATUS"
+assert_contains "second name used" "$OUT" "Public host:  vpn2.example.com.br"
+
+echo "# DDNS: a CNAME on the name asks for another name"
+STUB_CF_RECORDS='vpn.example.com.br target.example.net false CNAME\n' run_flow "$(ddns_answers | sed '22a vpn2.example.com.br')" --dry-run
+assert_contains "cname conflict message" "$CALLS" "records the dynamic DNS updater cannot manage"
+assert_contains "cname: second name used" "$OUT" "Public host:  vpn2.example.com.br"
+
+echo "# DDNS: upper-case zone and record are normalized"
+run_flow "$(ddns_answers | sed '20s/.*/Example.COM.br/; 21s/.*/VPN.Example.com.BR/')" --dry-run
+assert_eq "upper-case exits 0" 0 "$STATUS"
+assert_contains "record lower-cased" "$OUT" "Public host:  vpn.example.com.br"
+
+echo "# DDNS: record outside the zone is rejected"
+run_flow "$(ddns_answers | sed 's/^vpn.example.com.br$/vpn.other.com\nvpn.example.com.br/')" --dry-run
+assert_contains "record outside zone rejected" "$CALLS" "Invalid value: 'vpn.other.com'"
 
 echo "# no vlan"
 run_flow "$(default_answers | sed '10s/.*//')" --dry-run
@@ -184,6 +242,25 @@ assert_eq "env file mode" 600 "$(stat -c %a "$PUSHED/ovpn-install.env")"
 assert_not_contains "log has no ct password" "$LOGS" "$CT_PASS"
 assert_not_contains "log has no admin password" "$LOGS" "$ADMIN_PASS"
 assert_not_contains "no destroy on success" "$CALLS" "destroy"
+
+echo "# real run with DDNS and UDP only"
+run_flow "$(ddns_answers | sed '16s/.*/udp/; 17d')"
+assert_eq "ddns real run exits 0" 0 "$STATUS"
+assert_contains "updater pushed" "$CALLS" "/usr/local/sbin/openvpn-as-ddns --perms 0755"
+assert_contains "first update run" "$CALLS" "pct exec 105 -- systemctl start openvpn-as-ddns.service"
+(
+  source "$PUSHED/ovpn-install.env"
+  [[ $DDNS_TOKEN == "$CF_TOKEN" && $DDNS_ZONE == example.com.br && $DDNS_RECORD == vpn.example.com.br \
+    && $PUBLIC_HOST == vpn.example.com.br && $VPN_PROTOCOLS == udp ]]
+) && pass || fail "ddns settings reach the installer"
+assert_not_contains "log has no cf token" "$LOGS" "$CF_TOKEN"
+assert_not_contains "no ddns warning on success" "$OUT" "WARNING"
+
+echo "# real run: failed first DNS update is a warning, not a failure"
+STUB_PCT_FAIL_MATCH="systemctl start openvpn-as-ddns" run_flow "$(ddns_answers)"
+assert_eq "ddns failure still exits 0" 0 "$STATUS"
+assert_contains "ddns warning" "$OUT" "WARNING: the first dynamic DNS update failed"
+assert_not_contains "container kept" "$CALLS" "pct destroy"
 
 echo "# real run: failure after create offers to destroy"
 STUB_PCT_FAIL=start run_flow "$(default_answers; echo yes)"
