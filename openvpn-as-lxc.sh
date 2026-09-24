@@ -2,6 +2,11 @@
 # Creates an unprivileged Debian 13 LXC container on Proxmox VE and installs
 # OpenVPN Access Server in it, asking every setting through whiptail dialogs.
 #
+# Source:  https://github.com/cocardoso/proxmox-lxc-openvpn-as
+# License: MIT
+# This is an independent open-source project, not affiliated with, endorsed
+# or supported by OpenVPN Inc. or Proxmox Server Solutions GmbH.
+#
 # Usage: openvpn-as-lxc.sh [--dry-run] [--help]
 # Run as root on a Proxmox VE 8.4+ node (older pct rejects Debian 13).
 
@@ -242,6 +247,21 @@ select_bridge() {
 # ---------------------------------------------------------------------------
 # Steps
 # ---------------------------------------------------------------------------
+
+banner() {
+  cat <<'EOF'
+  ___                __     ______  _   _      _    ____
+ / _ \ _ __   ___ _ _\ \   / /  _ \| \ | |    / \  / ___|
+| | | | '_ \ / _ \ '_ \ \ / /| |_) |  \| |   / _ \ \___ \
+| |_| | |_) |  __/ | | \ V / |  __/| |\  |  / ___ \ ___) |
+ \___/| .__/ \___|_| |_|\_/  |_|   |_| \_| /_/   \_\____/
+      |_|
+EOF
+  printf '  OpenVPN Access Server LXC for Proxmox VE - v%s\n' "$SCRIPT_VERSION"
+  printf '  https://github.com/cocardoso/proxmox-lxc-openvpn-as\n\n'
+  printf '  Independent open-source project, not affiliated with, endorsed or\n'
+  printf '  supported by OpenVPN Inc. or Proxmox Server Solutions GmbH.\n\n'
+}
 
 usage() {
   cat <<EOF
@@ -571,6 +591,7 @@ main() {
   trap on_exit EXIT
 
   parse_args "$@"
+  banner
   preflight
   WORK_DIR=$(mktemp -d)
 
@@ -592,6 +613,7 @@ main() {
   print_summary
 }
 
-if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+# Run main unless sourced (tests). BASH_SOURCE is empty under bash -c "$(curl ...)".
+if [[ ${BASH_SOURCE[0]:-$0} == "$0" ]]; then
   main "$@"
 fi

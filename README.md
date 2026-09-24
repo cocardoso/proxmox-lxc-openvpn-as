@@ -1,117 +1,144 @@
-# OpenVPN Access Server em LXC no Proxmox VE
+# OpenVPN Access Server LXC for Proxmox VE
 
-Script interativo (whiptail) que cria um contêiner LXC **Debian 13 não
-privilegiado** no Proxmox VE e instala o
-[OpenVPN Access Server](https://openvpn.net/as-docs/) já configurado.
+A community script that creates an **unprivileged Debian 13 LXC container** on
+Proxmox VE and installs a working, pre-configured
+[OpenVPN Access Server](https://openvpn.net/access-server/) in it. Every setting
+is asked through interactive `whiptail` dialogs.
 
-## Requisitos
+> [!IMPORTANT]
+> This is an independent open-source project. It is **not affiliated with,
+> endorsed or supported by OpenVPN Inc.** or Proxmox Server Solutions GmbH.
+> "OpenVPN" and "Access Server" are trademarks of OpenVPN Inc.; "Proxmox" is a
+> trademark of Proxmox Server Solutions GmbH. OpenVPN Access Server is
+> commercial software under its own license: without a subscription it allows
+> a limited number of concurrent VPN connections.
 
-- Proxmox VE **8.4 ou mais novo** (o `pct` de versões anteriores recusa Debian 13), arquitetura **amd64**. O pacote
-- Executar como `root` no shell do nó.
-- Acesso à internet a partir do contêiner (`packages.openvpn.net` e `deb.debian.org`).
-- Um IP estático livre na rede da bridge escolhida.
+## Quick start
 
-## Uso
+Run this in the **Proxmox VE node shell** as `root`:
 
 ```bash
-# no shell do nó Proxmox
-bash openvpn-as-lxc.sh            # cria de verdade
-bash openvpn-as-lxc.sh --dry-run  # faz todas as perguntas e só mostra os comandos
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/cocardoso/proxmox-lxc-openvpn-as/main/openvpn-as-lxc.sh)"
 ```
 
-O script pergunta:
-
-| Item | Padrão |
-|------|--------|
-| CT ID | próximo livre (`pvesh get /cluster/nextid`) |
-| Hostname | `openvpn-as` |
-| Senha root do CT | — (mín. 8) |
-| Storage do template / do disco | menu (seleção automática se houver só um) |
-| Disco / vCPU / RAM | 8 GiB / 2 / 2048 MiB |
-| Bridge | menu com as `vmbr*` |
-| VLAN tag | vazio = sem VLAN |
-| IP/CIDR e gateway | obrigatórios (IP estático) |
-| DNS | o gateway |
-| Senha do admin (`openvpn`) | — (mín. 8) |
-| Host público | o IP do CT (troque pelo seu DNS/IP público) |
-| Porta TCP / UDP do daemon VPN | 443 / 1194 |
-
-Antes de criar, uma tela de resumo pede confirmação.
-
-## O que é criado
-
-- Contêiner com `unprivileged: 1`, `features: nesting=1`, `onboot: 1` e
-  `dev0: /dev/net/tun` (passthrough do TUN, nativo do PVE 8.1+).
-- No host: `/etc/modules-load.d/tun.conf` com `tun`, para o módulo carregar em
-  todo boot. Não é gravado se o `tun` já estiver em `/etc/modules` ou em
-  `/etc/modules-load.d/`.
-- Repositório oficial `http://packages.openvpn.net/as/debian trixie main`
-  com a chave em `/etc/apt/keyrings/as-repository.asc`, e o pacote `openvpn-as`.
-- Configuração via `sacli`: `host.name`, `vpn.server.daemon.tcp.port`,
-  `vpn.server.daemon.udp.port` e a senha local do usuário `openvpn`.
-- **DCO desligado** (`vpn.server.daemon.ovpndco=false`). O Data Channel Offload
-  (módulo `ovpn` do kernel), padrão no AS 3.x, precisa de `CAP_NET_ADMIN` no
-  namespace do host. Num LXC não privilegiado as chamadas netlink falham
-  (`dco_get_peer: Operation not permitted`) e os daemons caem. Sem DCO eles
-  usam `/dev/net/tun`.
-
-Ao final aparecem as URLs:
-
-- Admin UI: `https://<IP>:943/admin` (usuário `openvpn`)
-- Client UI: `https://<IP>:943/`, também servida na porta TCP da VPN
-
-## Portas para liberar no roteador/firewall
-
-| Porta | Uso |
-|-------|-----|
-| TCP 443 (ou a escolhida) | VPN via TCP + Client UI |
-| UDP 1194 (ou a escolhida) | VPN via UDP |
-| TCP 943 | Admin UI — **mantenha interna** se possível |
-
-## Segurança das senhas
-
-As senhas não aparecem no terminal, no log nem na linha de comando do host.
-Elas vão num arquivo `0600` enviado com `pct push`, lido pelo instalador e
-apagado logo em seguida. A única exceção é o `sacli SetLocalPassword`, que
-não aceita a senha por stdin: por um instante ela fica visível ao root
-**dentro** do contêiner.
-
-## Logs e erros
-
-- Log completo: `/var/log/openvpn-as-lxc-<CTID>.log` no host.
-- Se algo falhar depois da criação do contêiner, o script pergunta se deve
-  destruí-lo (`pct destroy --purge`) ou mantê-lo para inspeção.
-- Senha temporária original do Access Server: `/usr/local/openvpn_as/init.log`
-  dentro do CT (é substituída pela senha que você escolheu).
-
-### Troubleshooting
-
-| Sintoma | Verificação |
-|---------|-------------|
-| `cannot resolve packages.openvpn.net` | IP/gateway/VLAN/DNS errados; teste com `pct enter <id>` e `ping` |
-| CT não sobe após reboot do host (`/dev/net/tun` ausente) | `lsmod \| grep tun` e `cat /etc/modules-load.d/tun.conf` no host |
-| VPN conecta mas não passa tráfego | `ls -l /dev/net/tun` dentro do CT; `pct config <id>` deve ter `dev0: /dev/net/tun` |
-| Daemons `openvpn_N` em `off` | `sacli ConfigQuery \| grep ovpndco` deve ser `false`; veja `/var/log/openvpnas.log` no CT |
-| Admin UI não abre | `pct exec <id> -- /usr/local/openvpn_as/scripts/sacli status` |
-
-## Testes
+To see every command without changing anything, add `--dry-run`:
 
 ```bash
-bash tests/run.sh   # roda em Docker (debian:trixie), com stubs de pct/pveam/pvesm/pvesh/whiptail
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/cocardoso/proxmox-lxc-openvpn-as/main/openvpn-as-lxc.sh)" _ --dry-run
+```
+
+As always, read a script before piping it into a root shell.
+
+## Requirements
+
+- Proxmox VE **8.4 or newer**. Older `pct` versions reject Debian 13 containers.
+- An **amd64** host. The `openvpn-as` package is only published for amd64 on Debian.
+- Internet access from the container to `packages.openvpn.net` and `deb.debian.org`.
+- A free **static IPv4 address** on the bridge you choose.
+
+## What it asks
+
+| Setting | Default |
+|---------|---------|
+| Container ID | next free ID |
+| Hostname | `openvpn-as` |
+| Container root password | — (min. 8 characters) |
+| Template / disk storage | menu (auto-selected when there is only one) |
+| Disk / CPU cores / memory | 8 GiB / 2 / 2048 MiB |
+| Bridge | menu with the `vmbr*` bridges |
+| VLAN tag | empty = no VLAN |
+| IPv4/CIDR and gateway | required (static IP) |
+| DNS servers | the gateway |
+| Admin (`openvpn` user) password | — (min. 8 characters) |
+| Public hostname or IP | the container IP (change it to your public DNS name) |
+| VPN daemon TCP / UDP port | 443 / 1194 |
+
+A summary screen asks for confirmation before anything is created.
+
+## What it does
+
+On the **host**:
+
+- Adds `tun` to `/etc/modules-load.d/tun.conf`, unless `tun` is already listed in
+  `/etc/modules` or `/etc/modules-load.d/`.
+- Downloads the Debian 13 template for the host architecture if it is missing.
+- Creates the container with `unprivileged: 1`, `features: nesting=1`,
+  `onboot: 1` and `dev0: /dev/net/tun`. The TUN device passthrough is native
+  since Proxmox VE 8.1, so there is no manual `lxc.cgroup2` or `mknod` setup.
+
+Inside the **container**:
+
+- Upgrades the base system.
+- Adds the official repository (`http://packages.openvpn.net/as/debian trixie main`)
+  and installs `openvpn-as`.
+- Configures it with `sacli`: `host.name`, the TCP/UDP daemon ports and the
+  `openvpn` user password.
+- **Turns off DCO** (`vpn.server.daemon.ovpndco=false`). Access Server 3.x enables
+  Data Channel Offload by default. The kernel `ovpn` module needs `CAP_NET_ADMIN`
+  in the host namespace, so in an unprivileged container its netlink calls fail
+  with `Operation not permitted` and the VPN daemons stop. Without DCO, the
+  daemons use `/dev/net/tun`.
+- Checks that every VPN daemon is running and the web UI is listening.
+
+When it finishes, the script prints the URLs:
+
+- Admin UI: `https://<container-ip>:943/admin` (user `openvpn`)
+- Client UI: `https://<container-ip>:943/`, also served on the VPN TCP port
+
+## Ports
+
+| Port | Purpose | Expose to the internet? |
+|------|---------|-------------------------|
+| UDP 1194 (or your choice) | VPN over UDP (preferred) | Yes — port forward |
+| TCP 443 (or your choice) | VPN over TCP + Client UI | Yes — port forward |
+| TCP 943 | Admin UI and Client UI | No — keep it internal |
+
+## Security notes
+
+- Passwords are never shown, logged or passed on the host command line. They
+  travel in a `0600` file copied with `pct push`, which the installer reads and
+  deletes right away.
+- One exception: `sacli SetLocalPassword` has no stdin option, so the admin
+  password is briefly visible to root **inside** the container.
+- The Access Server web certificate is self-signed. Replace it (for example,
+  with Let's Encrypt from the Admin UI) before exposing the Client UI directly.
+
+## Logs and troubleshooting
+
+- Full log on the host: `/var/log/openvpn-as-lxc-<CTID>.log`.
+- If anything fails after the container is created, the script offers to
+  destroy it or keep it for inspection.
+
+| Symptom | Check |
+|---------|-------|
+| `cannot resolve packages.openvpn.net` | Wrong IP, gateway, VLAN or DNS. Try `pct enter <id>` and `ping`. |
+| VPN daemons `openvpn_N` are `off` | `sacli ConfigQuery \| grep ovpndco` must be `false`. See `/var/log/openvpnas.log` in the container. |
+| Container does not start after a host reboot | `lsmod \| grep tun` and `cat /etc/modules-load.d/tun.conf` on the host. |
+| Clients connect but no traffic passes | `pct config <id>` must show `dev0: /dev/net/tun`. |
+| Admin UI does not load | `pct exec <id> -- /usr/local/openvpn_as/scripts/sacli status` |
+
+## Tested on
+
+- Proxmox VE 9.2.11 (kernel 7.0.14-14-pve), Debian 13.6 template, OpenVPN Access Server 3.2.2.
+
+## Development
+
+```bash
+bash tests/run.sh             # runs the test suite in a debian:trixie Docker container
 shellcheck openvpn-as-lxc.sh
 ```
 
-Os testes cobrem validação de entrada, cancelamento, senhas com caracteres
-especiais, ausência de template/storage/bridge, rollback em caso de falha e
-ausência de senhas nos logs. Eles **não** substituem um teste num nó real.
+The tests replace `pct`, `pveam`, `pvesm`, `pvesh`, `whiptail` and friends with
+stubs in `tests/stubs`. They cover:
 
-### Checklist de teste manual num nó Proxmox
+- input validation, cancellation and retries;
+- passwords with special characters;
+- a missing template, storage or bridge, and too-old Proxmox VE versions;
+- rollback after a failure, and that no password reaches the logs;
+- the `bash -c "$(curl …)"` entry point.
 
-1. `bash openvpn-as-lxc.sh --dry-run` e confira os comandos impressos.
-2. Execução real com uma VLAN e um IP de teste.
-3. `pct config <id>` contém `unprivileged: 1`, `dev0: /dev/net/tun` e `net0` com `tag=`.
-4. Login em `https://<IP>:943/admin` com a senha escolhida.
-5. Em *Network Settings*, o hostname e as portas batem com o que foi informado.
-6. Baixe um perfil na Client UI e conecte via TCP e via UDP.
-7. Reinicie o nó e confirme que o CT sobe sozinho (`onboot`) e a VPN volta.
-8. Force uma falha (DNS inválido, p.ex. `192.0.2.1`) e confirme a oferta de destruir o CT.
+They do not replace a run on a real node.
+
+## License
+
+[MIT](LICENSE)

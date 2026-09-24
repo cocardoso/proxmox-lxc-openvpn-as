@@ -51,6 +51,26 @@ assert_not_contains "ct password hidden" "$OUT" "$CT_PASS"
 assert_not_contains "admin password hidden" "$OUT" "$ADMIN_PASS"
 assert_contains "summary shows admin url" "$OUT" "https://192.168.20.50:943/admin"
 
+echo "# banner and disclaimer"
+assert_contains "banner art" "$OUT" "|_|   |_| \\_| /_/   \\_\\____/"
+assert_contains "banner title" "$OUT" "OpenVPN Access Server LXC for Proxmox VE"
+assert_contains "disclaimer" "$OUT" "not affiliated with, endorsed or"
+assert_contains "disclaimer names vendors" "$OUT" "supported by OpenVPN Inc. or Proxmox Server Solutions GmbH."
+
+echo "# one-liner: bash -c \"\$(curl ...)\""
+OUT=$(bash -c "$(cat ./openvpn-as-lxc.sh)" openvpn-as-lxc --help 2>&1)
+assert_contains "one-liner runs main" "$OUT" "Usage:"
+run_flow_oneliner() {
+  local tmp
+  tmp=$(mktemp -d)
+  default_answers >"$tmp/answers"
+  OUT=$(STUB_ANSWERS="$tmp/answers" STUB_LOG="$tmp/calls" timeout 20 bash -c "$(cat ./openvpn-as-lxc.sh)" openvpn-as-lxc --dry-run 2>&1)
+  STATUS=$?
+}
+run_flow_oneliner
+assert_eq "one-liner dry run exits 0" 0 "$STATUS"
+assert_contains "one-liner creates container" "$OUT" "[dry-run] pct create 105"
+
 echo "# no vlan"
 run_flow "$(default_answers | sed '10s/.*//')" --dry-run
 assert_contains "net0 without tag" "$OUT" "gw=192.168.20.1 --nameserver"
